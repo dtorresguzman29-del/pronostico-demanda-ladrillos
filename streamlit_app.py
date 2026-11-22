@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import pandas as pd
@@ -8,11 +7,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from database import load_sales_records, save_sales_records
+from csv_import import read_sales_csv
 from forecasting import (
     SALES_COLUMN,
     YEAR_COLUMN,
     forecast_simple_exponential_smoothing,
-    incomplete_current_years,
     normalize_sales_data,
     sales_records_equal,
     validate_history,
@@ -22,24 +21,6 @@ APP_DIR = Path(__file__).resolve().parent
 SAMPLE_DATA_PATH = APP_DIR / "sample_data.csv"
 SAMPLE_DATA = pd.read_csv(SAMPLE_DATA_PATH)
 CSV_TEMPLATE = pd.DataFrame(columns=[YEAR_COLUMN, SALES_COLUMN]).to_csv(index=False)
-
-
-def read_uploaded_csv(uploaded_file):
-    """Lee archivos CSV de Excel con distintas codificaciones y separadores."""
-    csv_bytes = uploaded_file.getvalue()
-
-    for encoding in ("utf-8-sig", "cp1252", "latin1"):
-        try:
-            return pd.read_csv(
-                io.BytesIO(csv_bytes),
-                sep=None,
-                engine="python",
-                encoding=encoding,
-            )
-        except UnicodeDecodeError:
-            continue
-
-    raise ValueError("No se pudo identificar la codificación del archivo CSV.")
 
 
 def format_bricks(value: float | int) -> str:
@@ -79,7 +60,10 @@ if "csv_feedback" not in st.session_state:
     st.session_state.csv_feedback = None
 
 st.title("Pronóstico de demanda de ladrillos")
-st.caption("Planifica la producción con ventas anuales y suavización exponencial simple.")
+st.caption(
+    "Ingresa tus ventas históricas y obtén una estimación para el año siguiente, "
+    "teniendo en cuenta la tendencia de las ventas."
+)
 
 with st.sidebar:
     st.header("Datos y configuración")
@@ -89,10 +73,13 @@ with st.sidebar:
         max_value=1.0,
         value=0.30,
         step=0.01,
-        help="Un alfa alto responde más a las ventas recientes; uno bajo suaviza más la serie.",
+        help=(
+            "Un alfa alto da más importancia a los datos recientes; "
+            "uno bajo suaviza más los cambios."
+        ),
         format="%.2f",
     )
-    st.caption("0,01 da más peso al historial; 1,00 usa solo el último dato.")
+    st.caption("0,01 suaviza más los cambios; 1,00 responde más a los datos recientes.")
 
     st.download_button(
         "Descargar plantilla CSV",
@@ -101,11 +88,11 @@ with st.sidebar:
         mime="text/csv",
         width="stretch",
     )
-    st.caption("Usa las columnas Año y Ventas (ladrillos), con cantidades sin separadores de miles.")
+    st.caption(
+        "Usa las columnas Año y Ventas (ladrillos), con cantidades sin "
+        "separadores de miles."
+    )
 
-    # Keep these widgets outside st.form: form widgets do not trigger an
-    # individual rerun, so a submit button disabled by the checkbox value can
-    # remain disabled before the checkbox value is submitted.
     csv_widget_revision = st.session_state.data_revision
     uploaded_file = st.file_uploader(
         "Cargar ventas reales desde CSV",
@@ -142,9 +129,8 @@ with st.sidebar:
             )
         else:
             try:
-                uploaded_data = read_uploaded_csv(uploaded_file)
+                uploaded_data = read_sales_csv(uploaded_file.getvalue())
                 normalized_data, import_errors = normalize_sales_data(uploaded_data)
-
                 if import_errors:
                     st.session_state.csv_feedback = ("error", " ".join(import_errors))
                 elif normalized_data.empty:
@@ -169,10 +155,7 @@ with st.sidebar:
                             "success",
                             f"Se guardaron {len(normalized_data)} registros desde el CSV.",
                         )
-                        # A new widget key clears the old file and confirmation
-                        # only after PostgreSQL has committed the replacement.
                         st.rerun()
-
             except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
                 st.session_state.csv_feedback = (
                     "error",
@@ -227,8 +210,8 @@ if st.session_state.is_sample_data:
 
 st.subheader("Ventas históricas")
 st.caption(
-    "Edita las celdas directamente. Usa los controles de la tabla para agregar o "
-    "eliminar filas; cada año debe tener una sola cantidad."
+    "Edita las celdas directamente. Puedes agregar el año actual con las ventas "
+    "acumuladas que llevas hasta el momento. Cada año debe tener una sola fila."
 )
 
 edited_data = st.data_editor(
@@ -251,7 +234,10 @@ edited_data = st.data_editor(
             min_value=0,
             step=1000,
             format="%d",
-            help="Cantidad anual de ladrillos vendidos.",
+            help=(
+                "Cantidad de ladrillos vendidos en ese año. "
+                "Si el año está en curso, puedes ingresar el acumulado hasta hoy."
+            ),
         ),
     },
 )
@@ -265,20 +251,24 @@ changes_pending = not sales_records_equal(
     st.session_state.persisted_data,
 )
 edited_normalized, edited_errors = normalize_sales_data(st.session_state.sales_data)
+
 persisted_years = set(
     pd.to_numeric(
-        st.session_state.persisted_data.get(YEAR_COLUMN, pd.Series(dtype=float)),
+        st.session_state.persisted_data.get(
+            YEAR_COLUMN, pd.Series(dtype=float)
+        ),
         errors="coerce",
     ).dropna().astype(int).tolist()
 )
 edited_years = (
     set(edited_normalized[YEAR_COLUMN].astype(int).tolist())
-    if not edited_errors
-    else set()
+    if not edited_errors else set()
 )
-removed_years = sorted(persisted_years - edited_years) if not edited_errors else []
-confirm_deletions = False
+removed_years = (
+    sorted(persisted_years - edited_years) if not edited_errors else []
+)
 
+confirm_deletions = False
 if removed_years and changes_pending:
     st.warning(
         "Al guardar también se eliminarán del historial los años: "
@@ -299,12 +289,16 @@ with save_column:
     save_clicked = st.button(
         "Guardar cambios",
         type="primary",
-        disabled=not changes_pending or (bool(removed_years) and not confirm_deletions),
+        disabled=not changes_pending or (
+            bool(removed_years) and not confirm_deletions
+        ),
         width="stretch",
     )
 with status_column:
     if changes_pending:
-        st.warning("Hay cambios sin guardar. Guárdalos para conservarlos al reiniciar la app.")
+        st.warning(
+            "Hay cambios sin guardar. Guárdalos para conservarlos al reiniciar la app."
+        )
     else:
         st.caption("El historial está guardado en la base de datos.")
 
@@ -332,6 +326,7 @@ if save_clicked:
             st.rerun()
 
 source_records, source_errors = normalize_sales_data(st.session_state.sales_data)
+
 if source_errors:
     st.warning("Revisa los datos para calcular el pronóstico:")
     for source_error in source_errors:
@@ -342,35 +337,26 @@ if source_errors:
     )
     st.stop()
 
-incomplete_years = incomplete_current_years(source_records)
-if incomplete_years:
-    years_label = ", ".join(str(year) for year in incomplete_years)
-    st.warning(
-        f"Los datos de {years_label} corresponden al año calendario actual y "
-        "pueden estar incompletos. Se excluyen del cálculo para no tratarlos "
-        "como ventas de un año completo; los registros siguen conservados."
-    )
+# Se utilizan todos los años ingresados, incluido el año calendario actual.
+history, validation_errors = validate_history(source_records)
 
-forecast_records = source_records.loc[
-    ~source_records[YEAR_COLUMN].isin(incomplete_years)
-].copy()
-history, validation_errors = validate_history(forecast_records)
 if validation_errors:
     st.warning("Revisa los datos para calcular el pronóstico:")
     for validation_error in validation_errors:
         st.error(validation_error)
     st.info(
-        "Cuando queden al menos dos años consecutivos completos, sin duplicados y "
-        "con cantidades válidas, aparecerán el pronóstico y los resultados."
+        "Para calcular el pronóstico se necesitan al menos dos años consecutivos, "
+        "sin duplicados y con cantidades válidas."
     )
     st.stop()
 
 last_historical_year = int(history[YEAR_COLUMN].iloc[-1])
+
 if last_historical_year >= 9999:
     st.error("No es posible pronosticar después del año 9999.")
     st.stop()
 
-initial_target_year = max(2027, last_historical_year + 1)
+initial_target_year = last_historical_year + 1
 target_year = int(
     st.number_input(
         "Año objetivo del pronóstico",
@@ -378,13 +364,18 @@ target_year = int(
         max_value=9999,
         value=initial_target_year,
         step=1,
-        help="Puedes escribir un año posterior al último año histórico completo.",
+        help=(
+            "Por defecto se calcula el año siguiente al último año ingresado. "
+            "También puedes elegir un año posterior."
+        ),
     )
 )
 
 try:
     forecast = forecast_simple_exponential_smoothing(
-        history, alpha, target_year=target_year
+        history,
+        alpha,
+        target_year=target_year,
     )
 except (ValueError, RuntimeError) as error:
     st.error(f"No fue posible calcular el pronóstico: {error}")
@@ -398,27 +389,33 @@ metric_columns[0].metric(
     f"Pronóstico de ladrillos · {forecast.forecast_year}",
     format_bricks(forecast.forecast_units),
 )
-metric_columns[1].metric("Último año completo utilizado", str(last_historical_year))
+metric_columns[1].metric(
+    "Último año ingresado",
+    str(last_historical_year),
+)
 metric_columns[2].metric(
-    "Ventas del último año completo",
+    "Ventas del último año ingresado",
     format_bricks(history[SALES_COLUMN].iloc[-1]),
 )
 metric_columns[3].metric("Alfa (α)", f"{forecast.alpha:.2f}")
 
 historical_years_label = ", ".join(str(year) for year in history[YEAR_COLUMN])
 st.caption(
-    f"Años históricos completos utilizados: {historical_years_label}. "
-    f"Horizonte: {forecast.forecast_year - last_historical_year} "
-    f"período(s) anual(es)."
+    f"Años utilizados en el cálculo: {historical_years_label}. "
+    f"El pronóstico se calcula desde el último año ingresado."
+)
+
+last_year_value = float(history[SALES_COLUMN].iloc[-1])
+st.info(
+    "El modelo utiliza también el último año que ingresaste, aunque sus ventas "
+    "sean parciales. Si el año todavía no ha terminado, el resultado debe "
+    "interpretarse como una estimación basada en ese acumulado."
 )
 
 st.markdown("#### Ventas históricas y pronóstico")
 
 years = history[YEAR_COLUMN].astype(int).tolist()
 sales = history[SALES_COLUMN].astype(float).tolist()
-incomplete_records = source_records.loc[
-    source_records[YEAR_COLUMN].isin(incomplete_years)
-]
 
 figure = go.Figure()
 figure.add_trace(
@@ -426,38 +423,31 @@ figure.add_trace(
         x=years,
         y=sales,
         mode="lines+markers",
-        name="Ventas históricas",
+        name="Ventas ingresadas",
         line={"color": "#61A9BD", "width": 3},
         marker={"size": 8},
         hovertemplate="Año %{x}<br>Ventas: %{y:,.0f} ladrillos<extra></extra>",
     )
 )
 
-if not incomplete_records.empty:
-    figure.add_trace(
-        go.Scatter(
-            x=incomplete_records[YEAR_COLUMN].astype(int).tolist(),
-            y=incomplete_records[SALES_COLUMN].astype(float).tolist(),
-            mode="markers",
-            name="Ventas parciales (excluidas)",
-            marker={"color": "#8A8F98", "size": 10, "symbol": "x"},
-            hovertemplate="Año %{x}<br>Ventas parciales: %{y:,.0f} ladrillos"
-            "<extra></extra>",
-        )
-    )
-
-forecast_years = list(range(last_historical_year + 1, forecast.forecast_year + 1))
+forecast_years = list(
+    range(last_historical_year + 1, forecast.forecast_year + 1)
+)
 figure.add_trace(
     go.Scatter(
         x=[last_historical_year, *forecast_years],
-        y=[sales[-1], *([forecast.forecast_units] * len(forecast_years))],
+        y=[last_year_value, *forecast.results_table.loc[
+            forecast.results_table["Tipo"] == "Pronóstico",
+            "Pronóstico del modelo (ladrillos)",
+        ].astype(float).tolist()],
         mode="lines+markers",
-        name="Pronóstico SES",
+        name="Pronóstico con tendencia",
         line={"color": "#E98E2E", "width": 3, "dash": "dot"},
-        marker={"size": [7, 11], "symbol": ["circle", "square"]},
+        marker={"size": 8},
         hovertemplate="Año %{x}<br>Pronóstico: %{y:,.0f} ladrillos<extra></extra>",
     )
 )
+
 figure.add_vline(
     x=last_historical_year + 0.5,
     line={"color": "#979797", "dash": "dot", "width": 1},
@@ -472,17 +462,19 @@ figure.update_layout(
     yaxis={"title": "Ladrillos", "rangemode": "tozero"},
 )
 st.plotly_chart(figure, width="stretch", config={"displaylogo": False})
+
 st.caption(
-    "La línea punteada muestra el pronóstico desde el último año completo. SES mantiene "
-    "el mismo nivel para todos los pasos futuros; no modela tendencia ni estacionalidad."
+    "El pronóstico utiliza el método de Holt con tendencia amortiguada. "
+    "A diferencia del método anterior, puede reflejar una tendencia de subida "
+    "o bajada en las ventas."
 )
 
 st.markdown("#### Datos y resultados del método")
 display_results = forecast.results_table.copy()
+
 for result_column in (
     "Ventas reales (ladrillos)",
-    "Nivel suavizado (ladrillos)",
-    "Pronóstico a un paso (ladrillos)",
+    "Pronóstico del modelo (ladrillos)",
 ):
     display_results[result_column] = display_results[result_column].map(
         lambda value: "—" if pd.isna(value) else format_bricks(value)
@@ -498,15 +490,13 @@ st.dataframe(
         "Ventas reales (ladrillos)": st.column_config.TextColumn(
             "Ventas reales (ladrillos)"
         ),
-        "Nivel suavizado (ladrillos)": st.column_config.TextColumn(
-            "Nivel suavizado (ladrillos)"
-        ),
-        "Pronóstico a un paso (ladrillos)": st.column_config.TextColumn(
-            "Pronóstico a un paso (ladrillos)"
+        "Pronóstico del modelo (ladrillos)": st.column_config.TextColumn(
+            "Pronóstico del modelo (ladrillos)"
         ),
     },
 )
+
 st.caption(
-    "El primer año inicializa el nivel. En cada año siguiente, el nivel se actualiza "
-    "con α × ventas + (1 − α) × nivel anterior; el último nivel es el pronóstico."
+    "El método de Holt utiliza el nivel de ventas y su tendencia para calcular "
+    "el pronóstico. El parámetro alfa controla cuánto influyen los datos recientes."
 )
