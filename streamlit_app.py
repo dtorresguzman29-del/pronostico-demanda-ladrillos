@@ -433,13 +433,15 @@ figure.add_trace(
 forecast_years = list(
     range(last_historical_year + 1, forecast.forecast_year + 1)
 )
+
+forecast_values = forecast.results_table[
+    "Pronóstico del modelo (ladrillos)"
+].iloc[-len(forecast_years):].astype(float).tolist()
+
 figure.add_trace(
     go.Scatter(
         x=[last_historical_year, *forecast_years],
-        y=[last_year_value, *forecast.results_table.loc[
-            forecast.results_table["Tipo"] == "Pronóstico",
-            "Pronóstico del modelo (ladrillos)",
-        ].astype(float).tolist()],
+        y=[last_year_value, *forecast_values],
         mode="lines+markers",
         name="Pronóstico con tendencia",
         line={"color": "#E98E2E", "width": 3, "dash": "dot"},
