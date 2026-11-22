@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,24 @@ APP_DIR = Path(__file__).resolve().parent
 SAMPLE_DATA_PATH = APP_DIR / "sample_data.csv"
 SAMPLE_DATA = pd.read_csv(SAMPLE_DATA_PATH)
 CSV_TEMPLATE = pd.DataFrame(columns=[YEAR_COLUMN, SALES_COLUMN]).to_csv(index=False)
+
+
+def read_uploaded_csv(uploaded_file):
+    """Lee archivos CSV de Excel con distintas codificaciones y separadores."""
+    csv_bytes = uploaded_file.getvalue()
+
+    for encoding in ("utf-8-sig", "cp1252", "latin1"):
+        try:
+            return pd.read_csv(
+                io.BytesIO(csv_bytes),
+                sep=None,
+                engine="python",
+                encoding=encoding,
+            )
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError("No se pudo identificar la codificación del archivo CSV.")
 
 
 def format_bricks(value: float | int) -> str:
@@ -123,13 +142,9 @@ with st.sidebar:
             )
         else:
             try:
-                uploaded_data = pd.read_csv(
-                    uploaded_file,
-                    sep=None,
-                    engine="python",
-                    encoding="utf-8-sig",
-                )
+                uploaded_data = read_uploaded_csv(uploaded_file)
                 normalized_data, import_errors = normalize_sales_data(uploaded_data)
+
                 if import_errors:
                     st.session_state.csv_feedback = ("error", " ".join(import_errors))
                 elif normalized_data.empty:
@@ -157,6 +172,7 @@ with st.sidebar:
                         # A new widget key clears the old file and confirmation
                         # only after PostgreSQL has committed the replacement.
                         st.rerun()
+
             except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
                 st.session_state.csv_feedback = (
                     "error",
@@ -250,12 +266,19 @@ changes_pending = not sales_records_equal(
 )
 edited_normalized, edited_errors = normalize_sales_data(st.session_state.sales_data)
 persisted_years = set(
-    pd.to_numeric(st.session_state.persisted_data.get(YEAR_COLUMN, pd.Series(dtype=float)),
-                  errors="coerce").dropna().astype(int).tolist()
+    pd.to_numeric(
+        st.session_state.persisted_data.get(YEAR_COLUMN, pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna().astype(int).tolist()
 )
-edited_years = set(edited_normalized[YEAR_COLUMN].astype(int).tolist()) if not edited_errors else set()
+edited_years = (
+    set(edited_normalized[YEAR_COLUMN].astype(int).tolist())
+    if not edited_errors
+    else set()
+)
 removed_years = sorted(persisted_years - edited_years) if not edited_errors else []
 confirm_deletions = False
+
 if removed_years and changes_pending:
     st.warning(
         "Al guardar también se eliminarán del historial los años: "
@@ -270,6 +293,7 @@ if removed_years and changes_pending:
             f"{hash(tuple(edited_normalized.itertuples(index=False, name=None)))}"
         ),
     )
+
 save_column, status_column = st.columns([1, 3])
 with save_column:
     save_clicked = st.button(
@@ -395,6 +419,7 @@ sales = history[SALES_COLUMN].astype(float).tolist()
 incomplete_records = source_records.loc[
     source_records[YEAR_COLUMN].isin(incomplete_years)
 ]
+
 figure = go.Figure()
 figure.add_trace(
     go.Scatter(
@@ -407,6 +432,7 @@ figure.add_trace(
         hovertemplate="Año %{x}<br>Ventas: %{y:,.0f} ladrillos<extra></extra>",
     )
 )
+
 if not incomplete_records.empty:
     figure.add_trace(
         go.Scatter(
@@ -461,6 +487,7 @@ for result_column in (
     display_results[result_column] = display_results[result_column].map(
         lambda value: "—" if pd.isna(value) else format_bricks(value)
     )
+
 st.dataframe(
     display_results,
     hide_index=True,
